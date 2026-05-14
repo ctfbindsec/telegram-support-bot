@@ -6,15 +6,16 @@ import {
   Transaction,
   SystemProgram,
   sendAndConfirmTransaction,
-  LAMPORTS_PER_SOL,
 } from '@solana/web3.js';
 import * as log from 'fancy-log';
 import cache from '../../cache';
 import { OnChainConfig, EscrowInfo } from './types';
 
-// Seeds mirror the Anchor program constants
 const CONFIG_SEED = Buffer.from('config');
 const ESCROW_SEED = Buffer.from('escrow');
+
+// unix octal permission mask: owner read+write only (0600) or read-only (0400)
+const SAFE_KEYPAIR_MODES = [0o600, 0o400];
 
 class SolanaService {
   private static instance: SolanaService | null = null;
@@ -41,14 +42,50 @@ class SolanaService {
     this.connection = new Connection(solana_rpc_url, 'confirmed');
     this.programId = new PublicKey(solana_program_id);
 
-    const keypairData = JSON.parse(fs.readFileSync(solana_wallet_keypair_path, 'utf8'));
-    this.wallet = Keypair.fromSecretKey(Uint8Array.from(keypairData));
+    this.wallet = this.loadKeypair(solana_wallet_keypair_path);
 
     log.info(`SolanaService: connected to ${solana_rpc_url}`);
     log.info(`SolanaService: program ${solana_program_id}`);
     log.info(`SolanaService: authority ${this.wallet.publicKey.toBase58()}`);
 
     this.chainConfig = await this.readChainConfig();
+  }
+
+  /**
+   * Load keypair from a JSON file and enforce that the file is not
+   * world-readable (prevents accidental secret exposure).
+   */
+  private loadKeypair(keypairPath: string): Keypair {
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(keypairPath);
+    } catch {
+      throw new Error(`SolanaService: keypair file not found: ${keypairPath}`);
+    }
+
+    // Check permissions on non-Windows systems
+    if (process.platform !== 'win32') {
+      const mode = stat.mode & 0o777;
+      if (!SAFE_KEYPAIR_MODES.includes(mode)) {
+        throw new Error(
+          `SolanaService: keypair file ${keypairPath} has unsafe permissions ` +
+          `(${mode.toString(8)}). Run: chmod 600 ${keypairPath}`,
+        );
+      }
+    }
+
+    let keypairData: number[];
+    try {
+      keypairData = JSON.parse(fs.readFileSync(keypairPath, 'utf8'));
+    } catch {
+      throw new Error(`SolanaService: failed to parse keypair file: ${keypairPath}`);
+    }
+
+    if (!Array.isArray(keypairData) || keypairData.length !== 64) {
+      throw new Error('SolanaService: keypair file must be a JSON array of 64 bytes');
+    }
+
+    return Keypair.fromSecretKey(Uint8Array.from(keypairData));
   }
 
   // ── On-chain config ─────────────────────────────────────────────────────────
@@ -67,6 +104,14 @@ class SolanaService {
     if (!accountInfo) {
       log.warn('SolanaService: ConfigAccount not found on-chain; using local config');
       return this.localFallbackConfig();
+    }
+
+    // Verify the account is owned by our program (not a spoofed account)
+    if (!accountInfo.owner.equals(this.programId)) {
+      throw new Error(
+        `SolanaService: ConfigAccount is owned by ${accountInfo.owner.toBase58()}, ` +
+        `expected program ${this.programId.toBase58()}`,
+      );
     }
 
     // Deserialise: skip 8-byte Anchor discriminator, then read fields manually.
@@ -115,10 +160,6 @@ class SolanaService {
 
   // ── Escrow lifecycle ────────────────────────────────────────────────────────
 
-  /**
-   * Poll until the escrow PDA account is funded (or timeout).
-   * Returns true when funded, false on timeout.
-   */
   async awaitPayment(ticketId: number, timeoutMs = 300_000): Promise<boolean> {
     if (!this.connection) throw new Error('SolanaService not initialised');
     const [escrowPda] = this.getEscrowPda(ticketId);
@@ -131,11 +172,6 @@ class SolanaService {
     return false;
   }
 
-  /**
-   * Build and send a release_escrow instruction signed by the bot authority.
-   * Funds are transferred to the authority wallet (service provider).
-   * Returns the transaction signature.
-   */
   async releaseEscrow(ticketId: number): Promise<string> {
     if (!this.connection || !this.wallet || !this.programId) {
       throw new Error('SolanaService not initialised');
@@ -155,23 +191,22 @@ class SolanaService {
     );
 
     const tx = new Transaction().add(ix);
+    await simulateTransaction(this.connection, tx, this.wallet.publicKey);
     const sig = await sendAndConfirmTransaction(this.connection, tx, [this.wallet]);
     log.info(`SolanaService: released escrow for ticket #${ticketId} — tx ${sig}`);
     return sig;
   }
 
-  /**
-   * Build and send a refund_escrow instruction (SLA breach / no resolution).
-   * Funds are returned to the original customer account stored in the PDA.
-   */
   async refundEscrow(ticketId: number, customerPubkey: string): Promise<string> {
     if (!this.connection || !this.wallet || !this.programId) {
       throw new Error('SolanaService not initialised');
     }
 
+    // Validate the customer pubkey before building the transaction
+    const customer = parsePublicKey(customerPubkey);
+
     const [configPda] = PublicKey.findProgramAddressSync([CONFIG_SEED], this.programId);
     const [escrowPda] = this.getEscrowPda(ticketId);
-    const customer = new PublicKey(customerPubkey);
 
     const ix = buildRefundInstruction(
       this.programId,
@@ -183,6 +218,7 @@ class SolanaService {
     );
 
     const tx = new Transaction().add(ix);
+    await simulateTransaction(this.connection, tx, this.wallet.publicKey);
     const sig = await sendAndConfirmTransaction(this.connection, tx, [this.wallet]);
     log.info(`SolanaService: refunded escrow for ticket #${ticketId} — tx ${sig}`);
     return sig;
@@ -200,7 +236,38 @@ class SolanaService {
   }
 }
 
-// ── Instruction builders (raw, no IDL dependency) ────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function parsePublicKey(raw: string): PublicKey {
+  try {
+    return new PublicKey(raw);
+  } catch {
+    throw new Error(`SolanaService: invalid public key: ${raw}`);
+  }
+}
+
+/**
+ * Simulate a transaction and throw if the simulation reports an error.
+ * This catches on-chain errors (wrong status, wrong authority, etc.)
+ * before spending real SOL on a fee.
+ */
+async function simulateTransaction(
+  connection: Connection,
+  tx: Transaction,
+  feePayer: PublicKey,
+): Promise<void> {
+  tx.feePayer = feePayer;
+  // Recent blockhash is required for simulation even though we set it again before submit
+  const { blockhash } = await connection.getLatestBlockhash();
+  tx.recentBlockhash = blockhash;
+
+  const result = await connection.simulateTransaction(tx);
+  if (result.value.err) {
+    throw new Error(
+      `SolanaService: transaction simulation failed: ${JSON.stringify(result.value.err)}`,
+    );
+  }
+}
 
 function ticketIdBuffer(ticketId: number): Buffer {
   const buf = Buffer.alloc(8);
@@ -208,10 +275,6 @@ function ticketIdBuffer(ticketId: number): Buffer {
   return buf;
 }
 
-/**
- * Encode the `release_escrow` discriminator + ticket_id argument.
- * Anchor discriminator = sha256("global:release_escrow")[0..8]
- */
 function buildReleaseInstruction(
   programId: PublicKey,
   configPda: PublicKey,
@@ -220,7 +283,7 @@ function buildReleaseInstruction(
   authority: PublicKey,
   ticketId: number,
 ) {
-  const { TransactionInstruction, AccountMeta } = require('@solana/web3.js');
+  const { TransactionInstruction } = require('@solana/web3.js');
   const discriminator = anchorDiscriminator('global:release_escrow');
   const data = Buffer.concat([discriminator, ticketIdBuffer(ticketId)]);
 
