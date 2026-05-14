@@ -15,6 +15,8 @@ export interface ISupportee extends mongoose.Document {
   messenger: Messenger;
   status: string;
   category: string | null;
+  escrowAddress: string | null;
+  escrowSignature: string | null;
 }
 
 export const SupporteeSchema = new mongoose.Schema<ISupportee>({
@@ -25,6 +27,8 @@ export const SupporteeSchema = new mongoose.Schema<ISupportee>({
   messenger: { type: String, required: true },
   status: { type: String, default: 'open' },
   category: { type: String, default: null },
+  escrowAddress: { type: String, required: false, default: null },
+  escrowSignature: { type: String, required: false, default: null },
 });
 
 const Supportee = mongoose.model(collectionName, SupporteeSchema);
@@ -195,6 +199,17 @@ export const add = async (
     );
   }
   return result?.modifiedCount || 0;
+};
+
+export const setEscrow = async (
+  ticketId: number,
+  escrowAddress: string,
+  escrowSignature: string,
+): Promise<void> => {
+  await Supportee.updateOne(
+    { ticketId },
+    { $set: { escrowAddress, escrowSignature } },
+  );
 };
 
 export const open = async (

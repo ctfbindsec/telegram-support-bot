@@ -86,3 +86,32 @@ jest.mock('ws', () => {
         on: jest.fn(),
     }));
 });
+
+jest.mock('../src/addons/solana', () => {
+    const mockInstance = {
+        init: jest.fn().mockResolvedValue(undefined),
+        readChainConfig: jest.fn().mockResolvedValue({
+            llmModel: 'gpt-4o-mini',
+            llmKnowledge: 'Test knowledge base.',
+            slaMinutes: 60,
+            escrowLamports: 10000000,
+        }),
+        getCachedChainConfig: jest.fn().mockReturnValue({
+            llmModel: 'gpt-4o-mini',
+            llmKnowledge: 'Test knowledge base.',
+            slaMinutes: 60,
+            escrowLamports: 10000000,
+        }),
+        getEscrowInfo: jest.fn().mockReturnValue({
+            address: 'EscrowPDAAddress111111111111111111111111111',
+            lamports: 10000000,
+        }),
+        awaitPayment: jest.fn().mockResolvedValue(true),
+        releaseEscrow: jest.fn().mockResolvedValue('mock-tx-signature'),
+        refundEscrow: jest.fn().mockResolvedValue('mock-refund-signature'),
+    };
+    return {
+        __esModule: true,
+        default: { getInstance: jest.fn().mockReturnValue(mockInstance) },
+    };
+});

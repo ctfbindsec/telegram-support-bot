@@ -3,6 +3,7 @@ import * as middleware from './middleware';
 import * as db from './db';
 import { Context } from './interfaces';
 import { ISupportee } from './db';
+import SolanaService from './addons/solana';
 import * as log from 'fancy-log'
 
 /**
@@ -165,7 +166,12 @@ async function chat(ctx: Context) {
 
   // Auto-close the ticket if enabled
   if (cache.config.auto_close_tickets) {
-      db.add(ticketId, 'closed', null, ticket.messenger);
+    db.add(ticketId, 'closed', null, ticket.messenger);
+    if (cache.config.solana_enabled) {
+      SolanaService.getInstance().releaseEscrow(ticketId).catch((err) => {
+        log.error(`SolanaService: releaseEscrow failed for ticket #${ticketId}:`, err);
+      });
+    }
   }
 }
 
