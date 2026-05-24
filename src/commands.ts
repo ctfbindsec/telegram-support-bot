@@ -3,6 +3,7 @@ import cache from './cache';
 import * as middleware from './middleware';
 import { Context } from './interfaces';
 import { ISupportee } from './db';
+import SolanaService from './addons/solana';
 import * as log from 'fancy-log'
 
 /**
@@ -120,6 +121,11 @@ const closeCommand = (ctx: Context): void => {
     tickets.forEach(ticket => {
       if (ticket.id.toString().padStart(6, '0') === ticketId) {
         db.add(ticket.userid, 'closed', ticket.category, ctx.messenger);
+        if (cache.config.solana_enabled) {
+          SolanaService.getInstance().releaseEscrow(ticket.ticketId).catch((err) => {
+            log.error(`SolanaService: releaseEscrow failed for ticket #${ticket.ticketId}:`, err);
+          });
+        }
       }
       userId = ticket.userid;
     });

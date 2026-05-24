@@ -120,6 +120,13 @@ autoreply:
 #  - name: "Contact"
 #    msg: "Check out our Website"
 
+solana_enabled: false # Enable Solana escrow + on-chain AI config
+solana_rpc_url: 'https://api.mainnet-beta.solana.com' # Solana RPC endpoint (use devnet for testing)
+solana_program_id: 'YOUR_PROGRAM_ID' # Deployed Anchor program address
+solana_wallet_keypair_path: './config/solana-keypair.json' # Bot authority keypair (JSON array)
+solana_sla_minutes: 60 # Minutes before an unresolved escrow can be auto-refunded
+solana_escrow_lamports: 10000000 # Required customer deposit in lamports (0.01 SOL)
+
 use_llm: false # Will enable show_auto_replied when set to true
 llm_api_key: 'API_KEY'
 llm_base_url: 'https://api.openai.com/v1'

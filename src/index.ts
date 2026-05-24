@@ -6,6 +6,7 @@ import * as db from './db';
 import * as error from './error';
 import TelegramAddon from './addons/telegram';
 import SignalAddon from './addons/signal';
+import SolanaService from './addons/solana';
 import * as log from 'fancy-log'
 
 /**
@@ -64,6 +65,25 @@ function createAddons(): Addon[] {
 async function main(logs = true) {
   await db.connect();
   await checkAndMigrateDatabase();
+
+  // Load AI config and escrow parameters from the Solana program before
+  // starting any addon so the LLM picks up the on-chain knowledge base.
+  if (cache.config.solana_enabled) {
+    try {
+      const solana = SolanaService.getInstance();
+      await solana.init();
+      const chainConfig = solana.getCachedChainConfig();
+      if (chainConfig) {
+        cache.config.llm_model = chainConfig.llmModel;
+        cache.config.llm_knowledge = chainConfig.llmKnowledge;
+        cache.config.solana_sla_minutes = chainConfig.slaMinutes;
+        cache.config.solana_escrow_lamports = chainConfig.escrowLamports;
+        log.info('SolanaService: on-chain config applied to cache');
+      }
+    } catch (err) {
+      log.error('SolanaService: failed to load on-chain config, using local values:', err);
+    }
+  }
 
   // Create and store all enabled addons.
   const addons = createAddons();

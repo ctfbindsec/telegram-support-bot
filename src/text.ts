@@ -5,6 +5,8 @@ import * as users from './users';
 import * as middleware from './middleware';
 import { Addon, Context } from './interfaces';
 import { ISupportee } from './db';
+import SolanaService from './addons/solana';
+import * as log from 'fancy-log';
 
 /**
  * Checks if the given message text exists in the configured categories.
@@ -69,7 +71,14 @@ export async function ticketHandler(bot: Addon, ctx: Context): Promise<ISupporte
   if (chat.type === 'private') {
     const ticket = await db.getTicketByUserId(message.from.id, session.groupCategory)
     if (!ticket) {
-      db.add(message.from.id, 'open', session.groupCategory, messenger);
+      await db.add(message.from.id, 'open', session.groupCategory, messenger);
+
+      // When Solana escrow is enabled, prompt the user to fund the escrow
+      // before forwarding their first message to staff.
+      if (cache.config.solana_enabled) {
+        await initiateEscrow(ctx, message.from.id, session.groupCategory, messenger);
+        return null;
+      }
     }
     users.chat(ctx, message.chat);
     return ticket;
@@ -77,4 +86,51 @@ export async function ticketHandler(bot: Addon, ctx: Context): Promise<ISupporte
 
   // For non-private chats, use the staff chat handler.
   staff.chat(ctx);
+}
+
+/**
+ * Sends escrow payment instructions to the user and, once payment is
+ * confirmed on-chain, stores the escrow address and forwards the ticket.
+ */
+async function initiateEscrow(
+  ctx: Context,
+  userId: string,
+  category: string | null,
+  messenger: string,
+): Promise<void> {
+  try {
+    const solana = SolanaService.getInstance();
+    const newTicket = await db.getTicketByUserId(userId, category);
+    if (!newTicket) return;
+
+    const ticketId = newTicket.ticketId;
+    const escrowInfo = solana.getEscrowInfo(ticketId);
+    const solAmount = (escrowInfo.lamports / 1e9).toFixed(4);
+
+    middleware.reply(
+      ctx,
+      `To open ticket #T${String(ticketId).padStart(6, '0')}, please send exactly ` +
+      `${solAmount} SOL to:\n\n` +
+      `\`${escrowInfo.address}\`\n\n` +
+      `Your message will be forwarded to staff once payment is confirmed on-chain ` +
+      `(usually within 30 seconds).`,
+    );
+
+    // Await payment in the background — do not block the handler.
+    solana.awaitPayment(ticketId, 300_000).then(async (paid) => {
+      if (!paid) {
+        middleware.reply(ctx, 'Escrow payment not received within 5 minutes. Please try again.');
+        return;
+      }
+      await db.setEscrow(ticketId, escrowInfo.address, '');
+      // Now forward the user's first message to staff via the normal path.
+      users.chat(ctx, ctx.message.chat);
+    }).catch((err) => {
+      log.error('SolanaService: awaitPayment error:', err);
+    });
+  } catch (err) {
+    log.error('SolanaService: initiateEscrow error:', err);
+    // On any Solana error, fall through to normal ticket flow so support isn't broken.
+    users.chat(ctx, ctx.message.chat);
+  }
 }

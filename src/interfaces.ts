@@ -125,6 +125,12 @@ export class Config {
   llm_base_url: string;
   llm_model: string;
   llm_knowledge: string;
+  solana_enabled: boolean = false;
+  solana_rpc_url: string = 'https://api.mainnet-beta.solana.com';
+  solana_program_id: string = '';
+  solana_wallet_keypair_path: string = './config/solana-keypair.json';
+  solana_sla_minutes: number = 60;
+  solana_escrow_lamports: number = 10000000;
 }
 
 export interface Cache {
